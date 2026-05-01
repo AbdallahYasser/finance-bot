@@ -1,0 +1,14 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+data/
+venv/
+.venv/
+.pytest_cache/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+SETUP_NEXT_STEPS.md
