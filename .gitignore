@@ -6,6 +6,7 @@ __pycache__/
 data/
 venv/
 .venv/
+.venv-test/
 .pytest_cache/
 *.db
 *.db-journal

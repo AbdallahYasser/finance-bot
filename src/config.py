@@ -12,4 +12,5 @@ DEFAULT_LANGUAGE: str = os.getenv("DEFAULT_LANGUAGE", "en")
 _raw = os.getenv("ALLOWED_USERS", "")
 ALLOWED_USERS: set[int] = {int(x.strip()) for x in _raw.split(",") if x.strip().isdigit()}
 
-os.makedirs(os.path.dirname(DB_PATH) if os.path.dirname(DB_PATH) else ".", exist_ok=True)
+# Note: DB directory creation moved to db.schema.init_db() so that imports
+# don't have side effects on the host filesystem (matters for tests).
