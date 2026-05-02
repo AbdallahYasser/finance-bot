@@ -1,4 +1,7 @@
-"""/start (with first-run wizard) and /ping."""
+"""/start (with first-run wizard), /cancel and /ping."""
+import html
+import logging
+
 import aiosqlite
 from aiogram import Router, F
 from aiogram.filters import Command
@@ -12,7 +15,15 @@ from src.db import wallets as wallets_db
 from src.utils.currency import parse_amount, format_amount_cents
 from src.utils.keyboards import language_kb, skip_kb
 
+logger = logging.getLogger(__name__)
+
 router = Router()
+
+
+# Magic filter for "text input that is NOT a slash command".
+# Used on every state-bound text-fallback handler so commands always work
+# (including escape hatches like /cancel and /start) even mid-flow.
+NOT_COMMAND = F.text & ~F.text.startswith("/")
 
 
 class FirstRunStates(StatesGroup):
@@ -37,6 +48,9 @@ _WELCOME_TEXT = (
 @router.message(Command("start"))
 @require_allowed_user
 async def cmd_start(message: Message, state: FSMContext) -> None:
+    # Always clear stale state so /start recovers from a half-finished flow.
+    await state.clear()
+
     if await wallets_db.count_active() == 0:
         await state.set_state(FirstRunStates.lang)
         await message.answer(
@@ -48,6 +62,17 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
         )
         return
     await message.answer(_WELCOME_TEXT)
+
+
+@router.message(Command("cancel"))
+@require_allowed_user
+async def cmd_cancel(message: Message, state: FSMContext) -> None:
+    cur = await state.get_state()
+    await state.clear()
+    if cur:
+        await message.answer("✅ Cancelled. Send /start any time.")
+    else:
+        await message.answer("Nothing to cancel.")
 
 
 @router.message(Command("ping"))
@@ -94,7 +119,7 @@ async def setup_salary_cancel(callback: CallbackQuery, state: FSMContext) -> Non
     await callback.message.answer("Setup cancelled. Send /start again any time.")
 
 
-@router.message(FirstRunStates.salary_day)
+@router.message(FirstRunStates.salary_day, NOT_COMMAND)
 @require_allowed_user
 async def setup_salary_day(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
@@ -125,13 +150,18 @@ async def _ask_initial_balance(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(FirstRunStates.wallet_balance)
+@router.message(FirstRunStates.wallet_balance, NOT_COMMAND)
 @require_allowed_user
 async def setup_balance(message: Message, state: FSMContext) -> None:
+    raw = message.text or ""
     try:
-        cents = parse_amount(message.text or "")
+        cents = parse_amount(raw)
     except ValueError:
-        await message.answer("Couldn't parse that. Try <code>12500</code> or <code>12500.50</code>.")
+        logger.warning("Wizard: failed to parse balance: %r", raw)
+        await message.answer(
+            f"Couldn't parse <code>{html.escape(raw)}</code> as an amount.\n"
+            "Try <code>12500</code> or <code>12500.50</code> (or /cancel)."
+        )
         return
     await wallets_db.create(
         name_en="Bank (CIB)",

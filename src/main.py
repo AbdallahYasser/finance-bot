@@ -48,6 +48,7 @@ async def main() -> None:
         BotCommand(command="transfer",  description="Move money between wallets"),
         BotCommand(command="wallets",   description="List your wallets"),
         BotCommand(command="addwallet", description="Create a new wallet"),
+        BotCommand(command="cancel",    description="Cancel the current flow"),
         BotCommand(command="ping",      description="Check the bot is alive"),
     ])
 

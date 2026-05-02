@@ -1,4 +1,7 @@
 """/wallets and /addwallet handlers."""
+import html
+import logging
+
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
@@ -10,7 +13,11 @@ from src.db import wallets as wallets_db
 from src.utils.currency import parse_amount, format_amount_cents
 from src.utils.keyboards import wallet_types_kb
 
+logger = logging.getLogger(__name__)
+
 router = Router()
+
+NOT_COMMAND = F.text & ~F.text.startswith("/")
 
 
 class AddWalletStates(StatesGroup):
@@ -43,13 +50,14 @@ async def cmd_wallets(message: Message) -> None:
 @router.message(Command("addwallet"))
 @require_allowed_user
 async def cmd_addwallet(message: Message, state: FSMContext) -> None:
+    await state.clear()
     await state.set_state(AddWalletStates.name)
     await message.answer(
         "New wallet — what should I call it? (e.g. <code>Cash</code>, <code>Bank (NBE)</code>)"
     )
 
 
-@router.message(AddWalletStates.name)
+@router.message(AddWalletStates.name, NOT_COMMAND)
 @require_allowed_user
 async def addwallet_name(message: Message, state: FSMContext) -> None:
     name = (message.text or "").strip()
@@ -80,13 +88,18 @@ async def addwallet_type_cb(callback: CallbackQuery, state: FSMContext) -> None:
     )
 
 
-@router.message(AddWalletStates.initial_balance)
+@router.message(AddWalletStates.initial_balance, NOT_COMMAND)
 @require_allowed_user
 async def addwallet_balance(message: Message, state: FSMContext) -> None:
+    raw = message.text or ""
     try:
-        cents = parse_amount(message.text or "")
+        cents = parse_amount(raw)
     except ValueError:
-        await message.answer("Couldn't parse that. Try <code>12500</code> or <code>12500.50</code>.")
+        logger.warning("Failed to parse wallet balance: %r", raw)
+        await message.answer(
+            f"Couldn't parse <code>{html.escape(raw)}</code> as an amount.\n"
+            "Try <code>12500</code> or <code>12500.50</code> (or /cancel)."
+        )
         return
     data = await state.get_data()
     await wallets_db.create(

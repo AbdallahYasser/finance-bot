@@ -1,4 +1,6 @@
 """/spend, /income, /transfer FSM flows."""
+import html
+import logging
 from typing import Optional
 
 from aiogram import Router, F
@@ -14,7 +16,37 @@ from src.db import transactions as tx_db
 from src.utils.currency import parse_amount, format_amount_cents
 from src.utils.keyboards import wallets_kb, categories_kb, skip_kb
 
+logger = logging.getLogger(__name__)
+
 router = Router()
+
+NOT_COMMAND = F.text & ~F.text.startswith("/")
+
+
+async def _try_parse_or_reprompt(
+    message: Message, example: str = "250"
+) -> Optional[int]:
+    """Parse message.text as an amount or send a helpful reprompt.
+
+    Returns int cents on success, or None on failure (caller should `return`).
+    Echoes the offending text so the user can see exactly what was received,
+    and logs at WARNING level for diagnostics.
+    """
+    raw = message.text or ""
+    try:
+        cents = parse_amount(raw)
+        if cents <= 0:
+            raise ValueError("zero")
+        return cents
+    except ValueError:
+        logger.warning("Failed to parse amount: %r", raw)
+        safe = html.escape(raw)
+        await message.answer(
+            f"Couldn't parse <code>{safe}</code> as an amount.\n"
+            f"Try <code>{example}</code> or <code>{example}.50</code> "
+            f"(or send /cancel to stop)."
+        )
+        return None
 
 
 class SpendStates(StatesGroup):
@@ -43,19 +75,16 @@ class TransferStates(StatesGroup):
 @router.message(Command("spend"))
 @require_allowed_user
 async def cmd_spend(message: Message, state: FSMContext) -> None:
+    await state.clear()
     await state.set_state(SpendStates.amount)
     await message.answer("How much did you spend? (e.g. <code>250</code>)")
 
 
-@router.message(SpendStates.amount)
+@router.message(SpendStates.amount, NOT_COMMAND)
 @require_allowed_user
 async def spend_amount(message: Message, state: FSMContext) -> None:
-    try:
-        cents = parse_amount(message.text or "")
-        if cents <= 0:
-            raise ValueError("zero")
-    except ValueError:
-        await message.answer("Couldn't parse that. Try <code>250</code> or <code>250.50</code>.")
+    cents = await _try_parse_or_reprompt(message, example="250")
+    if cents is None:
         return
     await state.update_data(amount=cents)
     ws = await wallets_db.list_active()
@@ -112,7 +141,7 @@ async def spend_note_skip(callback: CallbackQuery, state: FSMContext) -> None:
         await _save_spend(callback.message, state, note=None)
 
 
-@router.message(SpendStates.note)
+@router.message(SpendStates.note, NOT_COMMAND)
 @require_allowed_user
 async def spend_note_text(message: Message, state: FSMContext) -> None:
     note = (message.text or "").strip() or None
@@ -144,19 +173,16 @@ async def _save_spend(message: Message, state: FSMContext, note: Optional[str]) 
 @router.message(Command("income"))
 @require_allowed_user
 async def cmd_income(message: Message, state: FSMContext) -> None:
+    await state.clear()
     await state.set_state(IncomeStates.amount)
     await message.answer("How much income? (e.g. <code>5000</code>)")
 
 
-@router.message(IncomeStates.amount)
+@router.message(IncomeStates.amount, NOT_COMMAND)
 @require_allowed_user
 async def income_amount(message: Message, state: FSMContext) -> None:
-    try:
-        cents = parse_amount(message.text or "")
-        if cents <= 0:
-            raise ValueError("zero")
-    except ValueError:
-        await message.answer("Couldn't parse that. Try <code>5000</code> or <code>5000.50</code>.")
+    cents = await _try_parse_or_reprompt(message, example="5000")
+    if cents is None:
         return
     await state.update_data(amount=cents)
     ws = await wallets_db.list_active()
@@ -213,7 +239,7 @@ async def income_note_skip(callback: CallbackQuery, state: FSMContext) -> None:
         await _save_income(callback.message, state, note=None)
 
 
-@router.message(IncomeStates.note)
+@router.message(IncomeStates.note, NOT_COMMAND)
 @require_allowed_user
 async def income_note_text(message: Message, state: FSMContext) -> None:
     note = (message.text or "").strip() or None
@@ -249,19 +275,16 @@ async def cmd_transfer(message: Message, state: FSMContext) -> None:
     if len(ws) < 2:
         await message.answer("Need at least 2 wallets to transfer. Run /addwallet first.")
         return
+    await state.clear()
     await state.set_state(TransferStates.amount)
     await message.answer("How much to transfer? (e.g. <code>1000</code>)")
 
 
-@router.message(TransferStates.amount)
+@router.message(TransferStates.amount, NOT_COMMAND)
 @require_allowed_user
 async def transfer_amount(message: Message, state: FSMContext) -> None:
-    try:
-        cents = parse_amount(message.text or "")
-        if cents <= 0:
-            raise ValueError("zero")
-    except ValueError:
-        await message.answer("Couldn't parse that. Try <code>1000</code> or <code>1000.50</code>.")
+    cents = await _try_parse_or_reprompt(message, example="1000")
+    if cents is None:
         return
     await state.update_data(amount=cents)
     ws = await wallets_db.list_active()
@@ -322,7 +345,7 @@ async def transfer_note_skip(callback: CallbackQuery, state: FSMContext) -> None
         await _save_transfer(callback.message, state, note=None)
 
 
-@router.message(TransferStates.note)
+@router.message(TransferStates.note, NOT_COMMAND)
 @require_allowed_user
 async def transfer_note_text(message: Message, state: FSMContext) -> None:
     note = (message.text or "").strip() or None

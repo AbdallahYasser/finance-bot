@@ -50,6 +50,58 @@ def test_rejects(bad):
         parse_amount(bad)
 
 
+# ---------- Tolerant parsing (new) ----------
+
+def test_strips_egp_suffix():
+    assert parse_amount("250 EGP") == 25000
+    assert parse_amount("250egp") == 25000
+
+
+def test_strips_le_suffix():
+    assert parse_amount("250 LE") == 25000
+
+
+def test_strips_pound_suffix():
+    assert parse_amount("250 pound") == 25000
+    assert parse_amount("250 pounds") == 25000
+
+
+def test_strips_arabic_currency_suffix():
+    assert parse_amount("250 جنيه") == 25000
+    assert parse_amount("250 ج.م") == 25000
+    assert parse_amount("250 ج") == 25000
+
+
+def test_leading_plus_sign():
+    assert parse_amount("+250") == 25000
+    assert parse_amount("+ 250") == 25000
+
+
+def test_arabic_indic_digits():
+    assert parse_amount("٢٥٠") == 25000
+    assert parse_amount("١٢٣٤٫٥٠") == 123450  # ٫ is Arabic decimal sep
+
+
+def test_persian_digits():
+    assert parse_amount("۲۵۰") == 25000
+
+
+def test_space_as_thousand_separator():
+    assert parse_amount("1 234") == 123400
+    assert parse_amount("1 234.50") == 123450
+
+
+def test_truncates_extra_decimals():
+    # 0.123 → 0.12 (truncated, no rounding)
+    assert parse_amount("0.123") == 12
+    assert parse_amount("250.999") == 25099
+
+
+def test_combined_currency_and_decimal():
+    assert parse_amount("1,234.50 EGP") == 123450
+    assert parse_amount("+1,234 ج.م") == 123400
+
+
 def test_format_basic():
     assert format_amount_cents(25000) == "250.00 EGP"
 
