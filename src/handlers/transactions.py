@@ -1,11 +1,11 @@
-"""/spend, /income, /transfer FSM flows."""
+"""/spend, /income, /transfer FSM flows + post-save date editing."""
 import html
 import logging
 from typing import Optional
 
 from aiogram import Router, F
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 
@@ -14,6 +14,7 @@ from src.db import wallets as wallets_db
 from src.db import categories as categories_db
 from src.db import transactions as tx_db
 from src.utils.currency import parse_amount, format_amount_cents
+from src.utils.dates import days_ago_utc_iso, parse_user_date, format_date_relative
 from src.utils.keyboards import wallets_kb, categories_kb, skip_kb
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,156 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 NOT_COMMAND = F.text & ~F.text.startswith("/")
+
+
+# ---------- Confirmation rendering + edit-date keyboard ----------
+
+def _editdate_kb(tx_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="📅 Change date", callback_data=f"editdate_open:{tx_id}"),
+    ]])
+
+
+def _editdate_picker_kb(tx_id: int) -> InlineKeyboardMarkup:
+    rows = []
+    for a, b in [(0, 1), (2, 3), (4, 5), (6, 7)]:
+        labels = {
+            0: "📅 Today", 1: "⬅️ Yesterday",
+            2: "2 days ago", 3: "3 days ago",
+            4: "4 days ago", 5: "5 days ago",
+            6: "6 days ago", 7: "7 days ago",
+        }
+        rows.append([
+            InlineKeyboardButton(text=labels[a], callback_data=f"editdate_pick:{tx_id}:{a}"),
+            InlineKeyboardButton(text=labels[b], callback_data=f"editdate_pick:{tx_id}:{b}"),
+        ])
+    rows.append([
+        InlineKeyboardButton(text="✏️ Type a date", callback_data=f"editdate_custom:{tx_id}"),
+    ])
+    rows.append([
+        InlineKeyboardButton(text="✖ Close", callback_data=f"editdate_close:{tx_id}"),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _render_tx_confirmation(tx_id: int) -> str:
+    """Build the confirmation text for a saved transaction (re-fetched fresh)."""
+    t = await tx_db.get(tx_id)
+    if not t:
+        return "(transaction not found)"
+
+    date_str = format_date_relative(t["occurred_at"])
+    amt = format_amount_cents(t["amount_cents"])
+
+    cat_icon = t.get("category_icon") or ""
+    cat_name = t.get("category_name") or t.get("category_name_ar") or ""
+    cat_label = (cat_icon + " " + cat_name).strip() or "—"
+
+    if t["type"] == "spend":
+        src_name = t.get("source_name") or t.get("source_name_ar") or "?"
+        bal = await wallets_db.get_balance_cents(t["source_wallet_id"])
+        text = (
+            f"✅ Logged {amt} from <b>{src_name}</b> → {cat_label} "
+            f"<i>({date_str})</i>.\nBalance: {format_amount_cents(bal)}"
+        )
+    elif t["type"] == "income":
+        dst_name = t.get("dest_name") or t.get("dest_name_ar") or "?"
+        bal = await wallets_db.get_balance_cents(t["dest_wallet_id"])
+        text = (
+            f"✅ Logged {amt} income to <b>{dst_name}</b> · {cat_label} "
+            f"<i>({date_str})</i>.\nBalance: {format_amount_cents(bal)}"
+        )
+    elif t["type"] == "transfer":
+        src_name = t.get("source_name") or t.get("source_name_ar") or "?"
+        dst_name = t.get("dest_name") or t.get("dest_name_ar") or "?"
+        src_bal = await wallets_db.get_balance_cents(t["source_wallet_id"])
+        dst_bal = await wallets_db.get_balance_cents(t["dest_wallet_id"])
+        text = (
+            f"✅ Transferred {amt} <i>({date_str})</i>.\n"
+            f"<b>{src_name}</b>: {format_amount_cents(src_bal)}\n"
+            f"<b>{dst_name}</b>: {format_amount_cents(dst_bal)}"
+        )
+    else:
+        text = f"✅ {amt} <i>({date_str})</i>"
+
+    if t.get("note"):
+        text += f"\nNote: {html.escape(t['note'])}"
+    return text
+
+
+class EditDateStates(StatesGroup):
+    custom = State()
+
+
+@router.callback_query(F.data.startswith("editdate_open:"))
+@require_allowed_user
+async def editdate_open(callback: CallbackQuery) -> None:
+    tx_id = int(callback.data.split(":")[1])
+    await callback.answer()
+    await callback.message.edit_reply_markup(reply_markup=_editdate_picker_kb(tx_id))
+
+
+@router.callback_query(F.data.startswith("editdate_close:"))
+@require_allowed_user
+async def editdate_close(callback: CallbackQuery) -> None:
+    tx_id = int(callback.data.split(":")[1])
+    await callback.answer()
+    await callback.message.edit_reply_markup(reply_markup=_editdate_kb(tx_id))
+
+
+@router.callback_query(F.data.startswith("editdate_pick:"))
+@require_allowed_user
+async def editdate_pick(callback: CallbackQuery) -> None:
+    parts = callback.data.split(":")
+    tx_id = int(parts[1])
+    days_ago = int(parts[2])
+    new_iso = days_ago_utc_iso(days_ago)
+    ok = await tx_db.update_occurred_at(tx_id, new_iso)
+    await callback.answer("Date updated" if ok else "Transaction not found")
+    text = await _render_tx_confirmation(tx_id)
+    await callback.message.edit_text(text, reply_markup=_editdate_kb(tx_id))
+
+
+@router.callback_query(F.data.startswith("editdate_custom:"))
+@require_allowed_user
+async def editdate_custom_open(callback: CallbackQuery, state: FSMContext) -> None:
+    tx_id = int(callback.data.split(":")[1])
+    await callback.answer()
+    await state.clear()
+    await state.set_state(EditDateStates.custom)
+    await state.update_data(tx_id=tx_id)
+    await callback.message.answer(
+        "Type the date — examples:\n"
+        "• <code>2026-05-01</code>\n"
+        "• <code>1/5/2026</code>\n"
+        "• <code>1/5</code> (this year)\n"
+        "• <code>yesterday</code>\n"
+        "Or send /cancel."
+    )
+
+
+@router.message(EditDateStates.custom, NOT_COMMAND)
+@require_allowed_user
+async def editdate_custom_text(message: Message, state: FSMContext) -> None:
+    raw = message.text or ""
+    try:
+        new_iso = parse_user_date(raw)
+    except ValueError:
+        logger.warning("Failed to parse date: %r", raw)
+        await message.answer(
+            f"Couldn't parse <code>{html.escape(raw)}</code> as a date.\n"
+            "Try <code>2026-05-01</code> or <code>1/5/2026</code> (or /cancel)."
+        )
+        return
+    data = await state.get_data()
+    tx_id = data.get("tx_id")
+    await state.clear()
+    if not tx_id:
+        await message.answer("Lost track of which transaction to edit. Try again.")
+        return
+    await tx_db.update_occurred_at(tx_id, new_iso)
+    text = await _render_tx_confirmation(tx_id)
+    await message.answer(text, reply_markup=_editdate_kb(tx_id))
 
 
 async def _try_parse_or_reprompt(
@@ -151,21 +302,14 @@ async def spend_note_text(message: Message, state: FSMContext) -> None:
 async def _save_spend(message: Message, state: FSMContext, note: Optional[str]) -> None:
     data = await state.get_data()
     await state.clear()
-    await tx_db.insert_spend(
+    tx_id = await tx_db.insert_spend(
         amount_cents=data["amount"],
         source_wallet_id=data["wallet_id"],
         category_id=data["category_id"],
         note=note,
     )
-    w = await wallets_db.get(data["wallet_id"])
-    cat = await categories_db.get(data["category_id"])
-    bal = await wallets_db.get_balance_cents(data["wallet_id"])
-    await message.answer(
-        f"✅ Logged {format_amount_cents(data['amount'])} from "
-        f"<b>{w['name_en'] or w['name_ar']}</b> → "
-        f"{cat['icon'] or ''} {cat['name_en'] or cat['name_ar']}.\n"
-        f"Balance: {format_amount_cents(bal)}"
-    )
+    text = await _render_tx_confirmation(tx_id)
+    await message.answer(text, reply_markup=_editdate_kb(tx_id))
 
 
 # ---------- /income ----------
@@ -249,21 +393,14 @@ async def income_note_text(message: Message, state: FSMContext) -> None:
 async def _save_income(message: Message, state: FSMContext, note: Optional[str]) -> None:
     data = await state.get_data()
     await state.clear()
-    await tx_db.insert_income(
+    tx_id = await tx_db.insert_income(
         amount_cents=data["amount"],
         dest_wallet_id=data["wallet_id"],
         category_id=data["category_id"],
         note=note,
     )
-    w = await wallets_db.get(data["wallet_id"])
-    cat = await categories_db.get(data["category_id"])
-    bal = await wallets_db.get_balance_cents(data["wallet_id"])
-    await message.answer(
-        f"✅ Logged {format_amount_cents(data['amount'])} income to "
-        f"<b>{w['name_en'] or w['name_ar']}</b> · "
-        f"{cat['icon'] or ''} {cat['name_en'] or cat['name_ar']}.\n"
-        f"Balance: {format_amount_cents(bal)}"
-    )
+    text = await _render_tx_confirmation(tx_id)
+    await message.answer(text, reply_markup=_editdate_kb(tx_id))
 
 
 # ---------- /transfer ----------
@@ -355,18 +492,11 @@ async def transfer_note_text(message: Message, state: FSMContext) -> None:
 async def _save_transfer(message: Message, state: FSMContext, note: Optional[str]) -> None:
     data = await state.get_data()
     await state.clear()
-    await tx_db.insert_transfer(
+    tx_id = await tx_db.insert_transfer(
         amount_cents=data["amount"],
         source_wallet_id=data["from_wallet_id"],
         dest_wallet_id=data["to_wallet_id"],
         note=note,
     )
-    src = await wallets_db.get(data["from_wallet_id"])
-    dst = await wallets_db.get(data["to_wallet_id"])
-    src_bal = await wallets_db.get_balance_cents(data["from_wallet_id"])
-    dst_bal = await wallets_db.get_balance_cents(data["to_wallet_id"])
-    await message.answer(
-        f"✅ Transferred {format_amount_cents(data['amount'])}.\n"
-        f"<b>{src['name_en'] or src['name_ar']}</b>: {format_amount_cents(src_bal)}\n"
-        f"<b>{dst['name_en'] or dst['name_ar']}</b>: {format_amount_cents(dst_bal)}"
-    )
+    text = await _render_tx_confirmation(tx_id)
+    await message.answer(text, reply_markup=_editdate_kb(tx_id))

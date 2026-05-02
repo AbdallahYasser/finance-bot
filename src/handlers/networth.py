@@ -7,6 +7,7 @@ from src.auth import require_allowed_user
 from src.db import wallets as wallets_db
 from src.db import transactions as tx_db
 from src.utils.currency import format_amount_cents
+from src.utils.dates import format_date_relative
 
 router = Router()
 
@@ -44,8 +45,10 @@ async def cmd_balance(message: Message) -> None:
                 sign = "↔"
             cat = t.get('category_name') or '—'
             note = f" — {t['note']}" if t.get('note') else ""
+            date = format_date_relative(t.get('occurred_at') or '')
             lines.append(
-                f"  {sign}{format_amount_cents(t['amount_cents'])} · {cat}{note}"
+                f"  {sign}{format_amount_cents(t['amount_cents'])} · {cat}{note} "
+                f"<i>({date})</i>"
             )
 
     await message.answer("\n".join(lines))

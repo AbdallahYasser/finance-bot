@@ -6,16 +6,12 @@ Each insert validates the field combination required by its type:
 - transfer → both, must differ
 - refund → source_wallet_id + refund_of_id
 """
-from datetime import datetime, timezone
 from typing import Optional
 
 import aiosqlite
 
 from src import config
-
-
-def _now_utc_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+from src.utils.dates import now_utc_iso as _now_utc_iso
 
 
 async def insert_spend(
@@ -116,6 +112,40 @@ async def insert_refund(
         )
         await db.commit()
         return cur.lastrowid
+
+
+async def update_occurred_at(tx_id: int, new_iso_utc: str) -> bool:
+    """Set occurred_at on a non-deleted transaction. Returns True if a row updated."""
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        cur = await db.execute(
+            "UPDATE transactions SET occurred_at = ? WHERE id = ? AND deleted_at IS NULL",
+            (new_iso_utc, tx_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def get(tx_id: int) -> Optional[dict]:
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT t.*,
+                   c.name_en  AS category_name,
+                   c.name_ar  AS category_name_ar,
+                   c.icon     AS category_icon,
+                   sw.name_en AS source_name,    sw.name_ar AS source_name_ar,
+                   dw.name_en AS dest_name,      dw.name_ar AS dest_name_ar
+            FROM transactions t
+            LEFT JOIN categories c  ON c.id  = t.category_id
+            LEFT JOIN wallets   sw ON sw.id = t.source_wallet_id
+            LEFT JOIN wallets   dw ON dw.id = t.dest_wallet_id
+            WHERE t.id = ? AND t.deleted_at IS NULL
+            """,
+            (tx_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
 
 
 async def recent(limit: int = 5) -> list[dict]:

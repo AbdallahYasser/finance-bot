@@ -73,6 +73,41 @@ async def test_refund_links_to_original(seeded_db):
 
 
 @pytest.mark.asyncio
+async def test_update_occurred_at(seeded_db):
+    from src.utils.dates import days_ago_utc_iso
+    wid = await wallets_db.create("Cash", None, "cash", 0)
+    tx_id = await tx_db.insert_spend(
+        amount_cents=100, source_wallet_id=wid, category_id=None
+    )
+    new_iso = days_ago_utc_iso(2)
+    ok = await tx_db.update_occurred_at(tx_id, new_iso)
+    assert ok is True
+
+    row = await tx_db.get(tx_id)
+    assert row['occurred_at'] == new_iso
+
+
+@pytest.mark.asyncio
+async def test_update_occurred_at_missing_returns_false(seeded_db):
+    ok = await tx_db.update_occurred_at(99999, "2020-01-01T12:00:00Z")
+    assert ok is False
+
+
+@pytest.mark.asyncio
+async def test_get_returns_joined_fields(seeded_db):
+    from src.db import categories as cats_db
+    wid = await wallets_db.create("Cash", None, "cash", 0)
+    food = await cats_db.get_by_name("Food", "expense")
+    tx_id = await tx_db.insert_spend(
+        amount_cents=200, source_wallet_id=wid, category_id=food['id'], note="lunch"
+    )
+    row = await tx_db.get(tx_id)
+    assert row['category_name'] == "Food"
+    assert row['source_name'] == "Cash"
+    assert row['note'] == "lunch"
+
+
+@pytest.mark.asyncio
 async def test_recent_returns_newest_first(seeded_db):
     wid = await wallets_db.create("Cash", None, "cash", 0)
     a = await tx_db.insert_spend(amount_cents=100, source_wallet_id=wid, category_id=None)
