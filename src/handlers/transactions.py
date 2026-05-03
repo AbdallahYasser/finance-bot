@@ -361,6 +361,11 @@ async def spend_place_pick(callback: CallbackQuery, state: FSMContext) -> None:
         # Quick-save with no place/item/note
         await _save_spend(callback.message, state, note=None)
         return
+    if val == "skip":
+        # No place — continue to item step (e.g. phone bill, gift)
+        await state.update_data(place_id=None)
+        await _ask_item_step(callback.message, state, place_id=None)
+        return
     if val == "new":
         await state.set_state(SpendStates.place_new_branch)
         await callback.message.answer(
@@ -471,14 +476,20 @@ async def spend_place_new_chain_text(message: Message, state: FSMContext) -> Non
 
 # ---------- Item step ----------
 
-async def _ask_item_step(message: Message, state: FSMContext, place_id: int) -> None:
+async def _ask_item_step(
+    message: Message, state: FSMContext, place_id: Optional[int]
+) -> None:
     await state.set_state(SpendStates.item)
-    recent = await items_db.recent_at_place(place_id, limit=5)
-    if not recent:
+    if place_id:
+        recent = await items_db.recent_at_place(place_id, limit=5)
+        if not recent:
+            recent = await items_db.recent(limit=5)
+    else:
         recent = await items_db.recent(limit=5)
     text = (
         "What item? Pick recent, type to search, or create new.\n"
-        "Tap <b>Skip & save now</b> for no item/note."
+        "Tap <b>Skip item</b> to continue without one, "
+        "or <b>Save now</b> to skip everything."
     )
     await message.answer(text, reply_markup=items_kb(recent, "spend_i"))
 
@@ -494,6 +505,11 @@ async def spend_item_pick(callback: CallbackQuery, state: FSMContext) -> None:
         return
     if val == "skip_save":
         await _save_spend(callback.message, state, note=None)
+        return
+    if val == "skip":
+        # No item — continue to the note step
+        await state.update_data(item_id=None)
+        await _ask_note_step(callback.message, state)
         return
     if val == "new":
         # Ask for the name as a fresh text prompt

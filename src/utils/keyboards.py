@@ -97,7 +97,10 @@ def subcategories_kb(children: list[dict], prefix: str, parent_id: int) -> Inlin
 
 
 def places_kb(places: list[dict], prefix: str, allow_skip_save: bool = True) -> InlineKeyboardMarkup:
-    """Place picker with recents + new + optional 'Skip & save now'."""
+    """Place picker. Two skip levels:
+    - 'Skip place'  → no place, continue to item step (e.g. phone bill).
+    - 'Skip & save' → no place, no item, no note, save immediately.
+    """
     from src.db.places import label as place_label
     rows: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
@@ -112,9 +115,12 @@ def places_kb(places: list[dict], prefix: str, allow_skip_save: bool = True) -> 
     if row:
         rows.append(row)
     rows.append([InlineKeyboardButton(text="➕ New place", callback_data=f"{prefix}:new")])
+    rows.append([
+        InlineKeyboardButton(text="⏭ Skip place", callback_data=f"{prefix}:skip"),
+    ])
     if allow_skip_save:
         rows.append([
-            InlineKeyboardButton(text="⏭ Skip & save now",
+            InlineKeyboardButton(text="💾 Save now (skip place/item/note)",
                                  callback_data=f"{prefix}:skip_save"),
         ])
     rows.append([InlineKeyboardButton(text="❌ Cancel", callback_data=f"{prefix}:cancel")])
@@ -122,7 +128,10 @@ def places_kb(places: list[dict], prefix: str, allow_skip_save: bool = True) -> 
 
 
 def items_kb(items: list[dict], prefix: str, allow_skip_save: bool = True) -> InlineKeyboardMarkup:
-    """Item picker with recents + new + optional 'Skip & save now'."""
+    """Item picker. Two skip levels:
+    - 'Skip item'   → no item, continue to note step.
+    - 'Skip & save' → no item, no note, save immediately.
+    """
     from src.db.items import label as item_label
     rows: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
@@ -137,9 +146,12 @@ def items_kb(items: list[dict], prefix: str, allow_skip_save: bool = True) -> In
     if row:
         rows.append(row)
     rows.append([InlineKeyboardButton(text="➕ New item", callback_data=f"{prefix}:new")])
+    rows.append([
+        InlineKeyboardButton(text="⏭ Skip item", callback_data=f"{prefix}:skip"),
+    ])
     if allow_skip_save:
         rows.append([
-            InlineKeyboardButton(text="⏭ Skip & save now",
+            InlineKeyboardButton(text="💾 Save now (skip item/note)",
                                  callback_data=f"{prefix}:skip_save"),
         ])
     rows.append([InlineKeyboardButton(text="❌ Cancel", callback_data=f"{prefix}:cancel")])
