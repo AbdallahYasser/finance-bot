@@ -18,6 +18,8 @@ from src.handlers import start as start_handler
 from src.handlers import wallets as wallets_handler
 from src.handlers import transactions as transactions_handler
 from src.handlers import networth as networth_handler
+from src.handlers import places as places_handler
+from src.handlers import items as items_handler
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),
@@ -37,6 +39,8 @@ async def main() -> None:
     dp = Dispatcher(storage=storage)
     dp.include_router(start_handler.router)
     dp.include_router(wallets_handler.router)
+    dp.include_router(places_handler.router)
+    dp.include_router(items_handler.router)
     dp.include_router(transactions_handler.router)
     dp.include_router(networth_handler.router)
 
@@ -48,6 +52,10 @@ async def main() -> None:
         BotCommand(command="transfer",  description="Move money between wallets"),
         BotCommand(command="wallets",   description="List your wallets"),
         BotCommand(command="addwallet", description="Create a new wallet"),
+        BotCommand(command="places",    description="List places"),
+        BotCommand(command="addplace",  description="Create a new place"),
+        BotCommand(command="items",     description="List items"),
+        BotCommand(command="additem",   description="Create a new item"),
         BotCommand(command="cancel",    description="Cancel the current flow"),
         BotCommand(command="ping",      description="Check the bot is alive"),
     ])

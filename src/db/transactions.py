@@ -20,6 +20,8 @@ async def insert_spend(
     category_id: Optional[int],
     note: Optional[str] = None,
     occurred_at: Optional[str] = None,
+    item_id: Optional[int] = None,
+    place_id: Optional[int] = None,
 ) -> int:
     if amount_cents <= 0:
         raise ValueError("amount must be > 0")
@@ -29,10 +31,12 @@ async def insert_spend(
         cur = await db.execute(
             """
             INSERT INTO transactions
-              (type, amount_cents, source_wallet_id, category_id, note, occurred_at, source)
-            VALUES ('spend', ?, ?, ?, ?, ?, 'manual')
+              (type, amount_cents, source_wallet_id, category_id,
+               item_id, place_id, note, occurred_at, source)
+            VALUES ('spend', ?, ?, ?, ?, ?, ?, ?, 'manual')
             """,
-            (amount_cents, source_wallet_id, category_id, note, occurred_at or _now_utc_iso()),
+            (amount_cents, source_wallet_id, category_id,
+             item_id, place_id, note, occurred_at or _now_utc_iso()),
         )
         await db.commit()
         return cur.lastrowid
@@ -135,11 +139,18 @@ async def get(tx_id: int) -> Optional[dict]:
                    c.name_ar  AS category_name_ar,
                    c.icon     AS category_icon,
                    sw.name_en AS source_name,    sw.name_ar AS source_name_ar,
-                   dw.name_en AS dest_name,      dw.name_ar AS dest_name_ar
+                   dw.name_en AS dest_name,      dw.name_ar AS dest_name_ar,
+                   i.canonical_name_en AS item_name,
+                   i.canonical_name_ar AS item_name_ar,
+                   i.size              AS item_size,
+                   p.branch_name       AS place_branch,
+                   p.chain_name        AS place_chain
             FROM transactions t
             LEFT JOIN categories c  ON c.id  = t.category_id
             LEFT JOIN wallets   sw ON sw.id = t.source_wallet_id
             LEFT JOIN wallets   dw ON dw.id = t.dest_wallet_id
+            LEFT JOIN items     i  ON i.id  = t.item_id
+            LEFT JOIN places    p  ON p.id  = t.place_id
             WHERE t.id = ? AND t.deleted_at IS NULL
             """,
             (tx_id,),
@@ -153,9 +164,16 @@ async def recent(limit: int = 5) -> list[dict]:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """
-            SELECT t.*, c.name_en AS category_name, c.icon AS category_icon
+            SELECT t.*,
+                   c.name_en  AS category_name,
+                   c.icon     AS category_icon,
+                   i.canonical_name_en AS item_name,
+                   i.size              AS item_size,
+                   p.branch_name       AS place_branch
             FROM transactions t
             LEFT JOIN categories c ON c.id = t.category_id
+            LEFT JOIN items     i ON i.id = t.item_id
+            LEFT JOIN places    p ON p.id = t.place_id
             WHERE t.deleted_at IS NULL
             ORDER BY t.occurred_at DESC, t.id DESC
             LIMIT ?

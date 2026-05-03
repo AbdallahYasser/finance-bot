@@ -127,6 +127,80 @@ MIGRATIONS: list[tuple[str, str]] = [
           ('Refund',       'استرجاع',  'income',  '🔄', 1),
           ('Other Income', 'دخل آخر',   'income',  '➕', 1)
     """),
+    ("M2_0001_create_places", """
+        CREATE TABLE IF NOT EXISTS places (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            branch_name  TEXT NOT NULL,
+            chain_name   TEXT,
+            created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+            deleted_at   TEXT,
+            UNIQUE(branch_name, chain_name)
+        )
+    """),
+    ("M2_0002_create_items", """
+        CREATE TABLE IF NOT EXISTS items (
+            id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+            canonical_name_en    TEXT,
+            canonical_name_ar    TEXT,
+            size                 TEXT,
+            unit                 TEXT,
+            default_category_id  INTEGER REFERENCES categories(id),
+            created_at           TEXT NOT NULL DEFAULT (datetime('now')),
+            deleted_at           TEXT
+        )
+    """),
+    ("M2_0003_create_item_aliases", """
+        CREATE TABLE IF NOT EXISTS item_aliases (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id     INTEGER NOT NULL REFERENCES items(id),
+            alias_text  TEXT NOT NULL,
+            deleted_at  TEXT,
+            UNIQUE(item_id, alias_text)
+        )
+    """),
+    ("M2_0004_create_item_prices", """
+        CREATE TABLE IF NOT EXISTS item_prices (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id         INTEGER NOT NULL REFERENCES items(id),
+            place_id        INTEGER NOT NULL REFERENCES places(id),
+            price_cents     INTEGER NOT NULL CHECK (price_cents >= 0),
+            observed_at     TEXT NOT NULL,
+            on_sale         INTEGER NOT NULL DEFAULT 0,
+            transaction_id  INTEGER REFERENCES transactions(id),
+            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """),
+    ("M2_0005_idx_item_aliases_text",
+        "CREATE INDEX IF NOT EXISTS idx_item_aliases_text ON item_aliases(alias_text COLLATE NOCASE)"),
+    ("M2_0006_idx_item_prices",
+        "CREATE INDEX IF NOT EXISTS idx_item_prices ON item_prices(item_id, place_id, observed_at DESC)"),
+    ("M2_0007_idx_items_canonical_en",
+        "CREATE INDEX IF NOT EXISTS idx_items_canonical_en ON items(canonical_name_en COLLATE NOCASE)"),
+    ("M2_0008_seed_subcategories", """
+        INSERT INTO categories (parent_id, name_en, name_ar, kind, icon, is_default)
+        SELECT p.id, sub.name_en, sub.name_ar, 'expense', sub.icon, 1
+        FROM categories p
+        JOIN (
+          SELECT 'Food' AS parent, 'Breakfast'         AS name_en, 'فطار'        AS name_ar, '🌅' AS icon UNION ALL
+          SELECT 'Food',           'Lunch',                          'غداء',                    '🍽'  UNION ALL
+          SELECT 'Food',           'Dinner',                         'عشاء',                    '🌙' UNION ALL
+          SELECT 'Food',           'Snacks',                         'سناكس',                   '🍿' UNION ALL
+          SELECT 'Food',           'Coffee',                         'قهوة',                    '☕' UNION ALL
+          SELECT 'Transport',      'Taxi',                           'تاكسي',                   '🚕' UNION ALL
+          SELECT 'Transport',      'Fuel',                           'بنزين',                   '⛽' UNION ALL
+          SELECT 'Transport',      'Public transport',               'مواصلات عامة',           '🚌' UNION ALL
+          SELECT 'Bills',          'Rent',                           'إيجار',                   '🏠' UNION ALL
+          SELECT 'Bills',          'Internet',                       'إنترنت',                  '📶' UNION ALL
+          SELECT 'Bills',          'Electricity',                    'كهرباء',                  '⚡' UNION ALL
+          SELECT 'Bills',          'Phone',                          'موبايل',                  '📱' UNION ALL
+          SELECT 'Shopping',       'Groceries',                      'بقالة',                   '🛒' UNION ALL
+          SELECT 'Shopping',       'Clothes',                        'ملابس',                   '👕'
+        ) AS sub ON p.name_en = sub.parent AND p.parent_id IS NULL
+        WHERE NOT EXISTS (
+          SELECT 1 FROM categories c
+          WHERE c.parent_id = p.id AND c.name_en = sub.name_en
+        )
+    """),
 ]
 
 

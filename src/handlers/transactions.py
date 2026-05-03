@@ -13,9 +13,16 @@ from src.auth import require_allowed_user
 from src.db import wallets as wallets_db
 from src.db import categories as categories_db
 from src.db import transactions as tx_db
+from src.db import places as places_db
+from src.db import items as items_db
+from src.db import item_prices as item_prices_db
 from src.utils.currency import parse_amount, format_amount_cents
 from src.utils.dates import days_ago_utc_iso, parse_user_date, format_date_relative
-from src.utils.keyboards import wallets_kb, categories_kb, skip_kb
+from src.utils.fuzzy import rank as fuzzy_rank
+from src.utils.keyboards import (
+    wallets_kb, categories_kb, skip_kb,
+    subcategories_kb, places_kb, items_kb, search_results_kb,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +61,21 @@ def _editdate_picker_kb(tx_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _item_place_suffix(t: dict) -> str:
+    """Build ' · Water 500ml @ 7-Eleven Maadi' if either is set, else ''."""
+    parts = []
+    if t.get("item_name"):
+        name = t["item_name"]
+        if t.get("item_size"):
+            name = f"{name} ({t['item_size']})"
+        parts.append(name)
+    if t.get("place_branch"):
+        parts.append(f"@ {t['place_branch']}")
+    if not parts:
+        return ""
+    return " · " + " ".join(parts)
+
+
 async def _render_tx_confirmation(tx_id: int) -> str:
     """Build the confirmation text for a saved transaction (re-fetched fresh)."""
     t = await tx_db.get(tx_id)
@@ -66,12 +88,13 @@ async def _render_tx_confirmation(tx_id: int) -> str:
     cat_icon = t.get("category_icon") or ""
     cat_name = t.get("category_name") or t.get("category_name_ar") or ""
     cat_label = (cat_icon + " " + cat_name).strip() or "—"
+    extras = _item_place_suffix(t)
 
     if t["type"] == "spend":
         src_name = t.get("source_name") or t.get("source_name_ar") or "?"
         bal = await wallets_db.get_balance_cents(t["source_wallet_id"])
         text = (
-            f"✅ Logged {amt} from <b>{src_name}</b> → {cat_label} "
+            f"✅ Logged {amt} from <b>{src_name}</b> → {cat_label}{extras} "
             f"<i>({date_str})</i>.\nBalance: {format_amount_cents(bal)}"
         )
     elif t["type"] == "income":
@@ -204,6 +227,13 @@ class SpendStates(StatesGroup):
     amount = State()
     wallet = State()
     category = State()
+    subcategory = State()
+    place = State()
+    place_new_branch = State()
+    place_new_chain = State()
+    item = State()
+    item_new_size = State()
+    item_new_unit = State()
     note = State()
 
 
@@ -271,9 +301,343 @@ async def spend_category(callback: CallbackQuery, state: FSMContext) -> None:
         await state.clear()
         await callback.message.answer("Cancelled.")
         return
-    await state.update_data(category_id=int(val))
+
+    parent_id = int(val)
+    # Track the parent so subcategory step / save can fall back to it.
+    await state.update_data(parent_category_id=parent_id, category_id=parent_id)
+
+    children = await categories_db.list_children(parent_id)
+    if children:
+        await state.set_state(SpendStates.subcategory)
+        await callback.message.answer(
+            "Subcategory?",
+            reply_markup=subcategories_kb(children, "spend_sc", parent_id),
+        )
+        return
+
+    await _ask_place_step(callback.message, state)
+
+
+@router.callback_query(SpendStates.subcategory, F.data.startswith("spend_sc:"))
+@require_allowed_user
+async def spend_subcategory(callback: CallbackQuery, state: FSMContext) -> None:
+    parts = callback.data.split(":")
+    val = parts[1]
+    await callback.answer()
+    if val == "cancel":
+        await state.clear()
+        await callback.message.answer("Cancelled.")
+        return
+    if val == "none":
+        # Skip subcategory: keep parent category_id (already set).
+        pass
+    else:
+        await state.update_data(category_id=int(val))
+    await _ask_place_step(callback.message, state)
+
+
+# ---------- Place step ----------
+
+async def _ask_place_step(message: Message, state: FSMContext) -> None:
+    await state.set_state(SpendStates.place)
+    recent = await places_db.recent(limit=5)
+    text = (
+        "Where? Pick from recent, type to search, or create new.\n"
+        "Tap <b>Skip & save now</b> to skip place/item/note."
+    )
+    await message.answer(text, reply_markup=places_kb(recent, "spend_p"))
+
+
+@router.callback_query(SpendStates.place, F.data.startswith("spend_p:"))
+@require_allowed_user
+async def spend_place_pick(callback: CallbackQuery, state: FSMContext) -> None:
+    val = callback.data.split(":", 1)[1]
+    await callback.answer()
+    if val == "cancel":
+        await state.clear()
+        await callback.message.answer("Cancelled.")
+        return
+    if val == "skip_save":
+        # Quick-save with no place/item/note
+        await _save_spend(callback.message, state, note=None)
+        return
+    if val == "new":
+        await state.set_state(SpendStates.place_new_branch)
+        await callback.message.answer(
+            "New place — branch name? (e.g. <code>7-Eleven Maadi</code>)"
+        )
+        return
+    if val == "create_place":
+        # Created from search results — use the typed query as branch name
+        data = await state.get_data()
+        query = (data.get("place_query") or "").strip()
+        if not query:
+            await callback.message.answer("Lost the search query — type the branch name.")
+            await state.set_state(SpendStates.place_new_branch)
+            return
+        await state.update_data(place_new_branch=query)
+        await state.set_state(SpendStates.place_new_chain)
+        await callback.message.answer(
+            f"Got <b>{html.escape(query)}</b>. Chain name? (optional)",
+            reply_markup=skip_kb("spend_pchain"),
+        )
+        return
+
+    # Existing place picked
+    try:
+        await state.update_data(place_id=int(val))
+    except ValueError:
+        return
+    await _ask_item_step(callback.message, state, place_id=int(val))
+
+
+@router.message(SpendStates.place, NOT_COMMAND)
+@require_allowed_user
+async def spend_place_search(message: Message, state: FSMContext) -> None:
+    """Free-text in place state = fuzzy search; reshow keyboard with matches."""
+    query = (message.text or "").strip()
+    if not query:
+        return
+    await state.update_data(place_query=query)
+    all_places = await places_db.list_active()
+    choices = []
+    for p in all_places:
+        label = places_db.label(p)
+        choices.append((label, p["id"]))
+    matches = fuzzy_rank(query, choices, limit=8, cutoff=50)
+    await message.answer(
+        f"Matches for <b>{html.escape(query)}</b>:",
+        reply_markup=search_results_kb(
+            matches, prefix="spend_p", create_query=query, create_callback="create_place"
+        ),
+    )
+
+
+@router.message(SpendStates.place_new_branch, NOT_COMMAND)
+@require_allowed_user
+async def spend_place_new_branch(message: Message, state: FSMContext) -> None:
+    branch = (message.text or "").strip()
+    if not branch or len(branch) > 80:
+        await message.answer("Send a branch name (1-80 characters).")
+        return
+    await state.update_data(place_new_branch=branch)
+    await state.set_state(SpendStates.place_new_chain)
+    await message.answer(
+        "Chain name? (optional — e.g. <code>7-Eleven</code>)",
+        reply_markup=skip_kb("spend_pchain"),
+    )
+
+
+async def _create_place_and_continue(
+    message: Message, state: FSMContext, chain: Optional[str]
+) -> None:
+    data = await state.get_data()
+    branch = data["place_new_branch"]
+    try:
+        place_id = await places_db.create(branch_name=branch, chain_name=chain)
+    except Exception:
+        # Most likely UNIQUE(branch_name, chain_name) conflict — fetch existing
+        existing = await places_db.get_by_branch_chain(branch, chain)
+        place_id = existing["id"] if existing else 0
+        if not place_id:
+            await message.answer("Couldn't create place. Try again.")
+            return
+    await state.update_data(place_id=place_id)
+    await _ask_item_step(message, state, place_id=place_id)
+
+
+@router.callback_query(SpendStates.place_new_chain, F.data.startswith("spend_pchain:"))
+@require_allowed_user
+async def spend_place_new_chain_skip(callback: CallbackQuery, state: FSMContext) -> None:
+    val = callback.data.split(":", 1)[1]
+    await callback.answer()
+    if val == "cancel":
+        await state.clear()
+        await callback.message.answer("Cancelled.")
+        return
+    if val == "skip":
+        await _create_place_and_continue(callback.message, state, chain=None)
+
+
+@router.message(SpendStates.place_new_chain, NOT_COMMAND)
+@require_allowed_user
+async def spend_place_new_chain_text(message: Message, state: FSMContext) -> None:
+    chain = (message.text or "").strip()
+    if len(chain) > 80:
+        await message.answer("Chain name too long (max 80 characters).")
+        return
+    await _create_place_and_continue(message, state, chain=chain or None)
+
+
+# ---------- Item step ----------
+
+async def _ask_item_step(message: Message, state: FSMContext, place_id: int) -> None:
+    await state.set_state(SpendStates.item)
+    recent = await items_db.recent_at_place(place_id, limit=5)
+    if not recent:
+        recent = await items_db.recent(limit=5)
+    text = (
+        "What item? Pick recent, type to search, or create new.\n"
+        "Tap <b>Skip & save now</b> for no item/note."
+    )
+    await message.answer(text, reply_markup=items_kb(recent, "spend_i"))
+
+
+@router.callback_query(SpendStates.item, F.data.startswith("spend_i:"))
+@require_allowed_user
+async def spend_item_pick(callback: CallbackQuery, state: FSMContext) -> None:
+    val = callback.data.split(":", 1)[1]
+    await callback.answer()
+    if val == "cancel":
+        await state.clear()
+        await callback.message.answer("Cancelled.")
+        return
+    if val == "skip_save":
+        await _save_spend(callback.message, state, note=None)
+        return
+    if val == "new":
+        # Ask for the name as a fresh text prompt
+        await state.update_data(item_new_name=None)
+        await callback.message.answer(
+            "New item — name? (e.g. <code>Water bottle</code>)"
+        )
+        # Re-use the search state to receive the name as a free-text reply
+        await state.set_state(SpendStates.item)
+        await state.update_data(awaiting_item_name=True)
+        return
+    if val == "create_item":
+        data = await state.get_data()
+        query = (data.get("item_query") or "").strip()
+        if not query:
+            await callback.message.answer("Lost the search query — type the item name.")
+            await state.update_data(awaiting_item_name=True)
+            return
+        await state.update_data(item_new_name=query, awaiting_item_name=False)
+        await state.set_state(SpendStates.item_new_size)
+        await callback.message.answer(
+            f"Got <b>{html.escape(query)}</b>. Size? (e.g. <code>500ml</code>)",
+            reply_markup=skip_kb("spend_isize"),
+        )
+        return
+
+    # Existing item picked
+    try:
+        await state.update_data(item_id=int(val))
+    except ValueError:
+        return
+    await _ask_note_step(callback.message, state)
+
+
+@router.message(SpendStates.item, NOT_COMMAND)
+@require_allowed_user
+async def spend_item_search_or_name(message: Message, state: FSMContext) -> None:
+    """In item state, free text either:
+    - if awaiting_item_name=True → treat as the new-item name → go to size step
+    - else → fuzzy search and reshow keyboard
+    """
+    text = (message.text or "").strip()
+    if not text:
+        return
+
+    data = await state.get_data()
+    if data.get("awaiting_item_name"):
+        await state.update_data(item_new_name=text, awaiting_item_name=False)
+        await state.set_state(SpendStates.item_new_size)
+        await message.answer(
+            f"Got <b>{html.escape(text)}</b>. Size? (e.g. <code>500ml</code>)",
+            reply_markup=skip_kb("spend_isize"),
+        )
+        return
+
+    await state.update_data(item_query=text)
+    choices = await items_db.all_search_choices()
+    matches = fuzzy_rank(text, choices, limit=8, cutoff=50)
+    await message.answer(
+        f"Matches for <b>{html.escape(text)}</b>:",
+        reply_markup=search_results_kb(
+            matches, prefix="spend_i", create_query=text, create_callback="create_item"
+        ),
+    )
+
+
+@router.callback_query(SpendStates.item_new_size, F.data.startswith("spend_isize:"))
+@require_allowed_user
+async def spend_item_size_skip(callback: CallbackQuery, state: FSMContext) -> None:
+    val = callback.data.split(":", 1)[1]
+    await callback.answer()
+    if val == "cancel":
+        await state.clear()
+        await callback.message.answer("Cancelled.")
+        return
+    if val == "skip":
+        await state.update_data(item_new_size=None)
+        await state.set_state(SpendStates.item_new_unit)
+        await callback.message.answer(
+            "Unit? (e.g. <code>bottle</code>, <code>piece</code>)",
+            reply_markup=skip_kb("spend_iunit"),
+        )
+
+
+@router.message(SpendStates.item_new_size, NOT_COMMAND)
+@require_allowed_user
+async def spend_item_size_text(message: Message, state: FSMContext) -> None:
+    size = (message.text or "").strip()
+    if len(size) > 30:
+        await message.answer("Size too long (max 30 chars).")
+        return
+    await state.update_data(item_new_size=size or None)
+    await state.set_state(SpendStates.item_new_unit)
+    await message.answer(
+        "Unit? (e.g. <code>bottle</code>)",
+        reply_markup=skip_kb("spend_iunit"),
+    )
+
+
+@router.callback_query(SpendStates.item_new_unit, F.data.startswith("spend_iunit:"))
+@require_allowed_user
+async def spend_item_unit_skip(callback: CallbackQuery, state: FSMContext) -> None:
+    val = callback.data.split(":", 1)[1]
+    await callback.answer()
+    if val == "cancel":
+        await state.clear()
+        await callback.message.answer("Cancelled.")
+        return
+    if val == "skip":
+        await _create_item_and_continue(callback.message, state, unit=None)
+
+
+@router.message(SpendStates.item_new_unit, NOT_COMMAND)
+@require_allowed_user
+async def spend_item_unit_text(message: Message, state: FSMContext) -> None:
+    unit = (message.text or "").strip()
+    if len(unit) > 30:
+        await message.answer("Unit too long (max 30 chars).")
+        return
+    await _create_item_and_continue(message, state, unit=unit or None)
+
+
+async def _create_item_and_continue(
+    message: Message, state: FSMContext, unit: Optional[str]
+) -> None:
+    data = await state.get_data()
+    name = data.get("item_new_name", "").strip()
+    size = data.get("item_new_size")
+    default_cat = data.get("category_id") or data.get("parent_category_id")
+    item_id = await items_db.create(
+        canonical_name_en=name,
+        size=size,
+        unit=unit,
+        default_category_id=default_cat,
+    )
+    await state.update_data(item_id=item_id)
+    await _ask_note_step(message, state)
+
+
+# ---------- Note step (final) ----------
+
+async def _ask_note_step(message: Message, state: FSMContext) -> None:
     await state.set_state(SpendStates.note)
-    await callback.message.answer(
+    await message.answer(
         "Add a note? (optional — type one or tap Skip)",
         reply_markup=skip_kb("spend_n"),
     )
@@ -307,7 +671,16 @@ async def _save_spend(message: Message, state: FSMContext, note: Optional[str]) 
         source_wallet_id=data["wallet_id"],
         category_id=data["category_id"],
         note=note,
+        item_id=data.get("item_id"),
+        place_id=data.get("place_id"),
     )
+    if data.get("item_id") and data.get("place_id"):
+        await item_prices_db.insert(
+            item_id=data["item_id"],
+            place_id=data["place_id"],
+            price_cents=data["amount"],
+            transaction_id=tx_id,
+        )
     text = await _render_tx_confirmation(tx_id)
     await message.answer(text, reply_markup=_editdate_kb(tx_id))
 

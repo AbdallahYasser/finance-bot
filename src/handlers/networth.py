@@ -44,10 +44,18 @@ async def cmd_balance(message: Message) -> None:
             elif t['type'] == 'transfer':
                 sign = "↔"
             cat = t.get('category_name') or '—'
+            extras = ""
+            if t.get('item_name'):
+                item_label = t['item_name']
+                if t.get('item_size'):
+                    item_label = f"{item_label} ({t['item_size']})"
+                extras += f" · {item_label}"
+            if t.get('place_branch'):
+                extras += f" @ {t['place_branch']}"
             note = f" — {t['note']}" if t.get('note') else ""
             date = format_date_relative(t.get('occurred_at') or '')
             lines.append(
-                f"  {sign}{format_amount_cents(t['amount_cents'])} · {cat}{note} "
+                f"  {sign}{format_amount_cents(t['amount_cents'])} · {cat}{extras}{note} "
                 f"<i>({date})</i>"
             )
 
