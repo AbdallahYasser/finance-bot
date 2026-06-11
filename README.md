@@ -50,3 +50,5 @@ Auto-deployed to Coolify on push to `main`. See `docs/deploy.md` for setup. Tele
 - `docs/corner-cases.md` — known risks and how each is mitigated
 - `docs/deploy.md` — Coolify-specific deploy steps
 - `docs/user-guide.md` — end-user how-to (EN + AR)
+
+<!-- migration-smoke-test: 2026-06-11 21:39 UTC -->
